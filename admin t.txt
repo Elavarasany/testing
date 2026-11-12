@@ -81,6 +81,7 @@ const ORDER_STATUSES = [
   { value: "PENDING", label: "Pending" },
   { value: "CONFIRMED", label: "Confirmed" },
   { value: "SHIPPED", label: "Shipped" },
+  { value: "OUT_FOR_DELIVERY", label: "Out for Delivery" },
   { value: "DELIVERED", label: "Delivered" },
   { value: "CANCELLED", label: "Cancelled" },
 ];
@@ -2379,6 +2380,94 @@ const handleProductCsvImport = async (e) => {
    ORDERS
 ========================= */
 
+function OrderDeliveryEditor({ api, order, onReload, onNotice }) {
+  const [courierName, setCourierName] = useState(order.courierName || "");
+  const [trackingNumber, setTrackingNumber] = useState(order.trackingNumber || "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setCourierName(order.courierName || "");
+    setTrackingNumber(order.trackingNumber || "");
+  }, [order.courierName, order.trackingNumber]);
+
+  const saveDeliveryDetails = async () => {
+    if (!courierName.trim() || !trackingNumber.trim()) {
+      onNotice("Enter both courier name and tracking number.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const saved = await api.saveRecord({
+        url: `${ENDPOINTS.orders}/${order.id}/delivery`,
+        method: "PUT",
+        payload: {
+          courierName: courierName.trim(),
+          trackingNumber: trackingNumber.trim(),
+        },
+        fallbackMessage: "Unable to save delivery details",
+      });
+
+      if (saved) {
+        onNotice(`Delivery details saved for order #${order.id}.`);
+        await onReload();
+      }
+    } catch (error) {
+      onNotice(error.message || "Unable to save delivery details.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="admin-order-extra">
+      <h4>Courier & Tracking Details</h4>
+
+      <div>
+        <label htmlFor={`courier-${order.id}`}>Courier Name</label>
+        <input
+          id={`courier-${order.id}`}
+          type="text"
+          value={courierName}
+          onChange={(e) => setCourierName(e.target.value)}
+          placeholder="e.g. Blue Dart, DTDC, India Post"
+          disabled={saving || order.orderStatus === "DELIVERED"}
+        />
+      </div>
+
+      <div>
+        <label htmlFor={`tracking-${order.id}`}>Tracking Number / AWB</label>
+        <input
+          id={`tracking-${order.id}`}
+          type="text"
+          value={trackingNumber}
+          onChange={(e) => setTrackingNumber(e.target.value)}
+          placeholder="Enter tracking number"
+          disabled={saving || order.orderStatus === "DELIVERED"}
+        />
+      </div>
+
+      <button
+        type="button"
+        className="admin-primary-button"
+        onClick={saveDeliveryDetails}
+        disabled={saving || order.orderStatus === "DELIVERED"}
+      >
+        {saving ? "Saving..." : "Save Delivery Details"}
+      </button>
+
+      {order.courierName && order.trackingNumber && (
+        <p>
+          <strong>Saved courier:</strong> {order.courierName}
+          <br />
+          <strong>Saved tracking number:</strong> {order.trackingNumber}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function OrdersPage({ api, orders, loading, onReload, onNotice }) {
   const [search, setSearch] = useState("");
   const [range, setRange] = useState(EMPTY_RANGE);
@@ -2524,6 +2613,12 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
                     <strong>Razorpay Order ID:</strong> {order.razorpayOrderId || "Not available"}
                   </p>
                 </div>
+                <OrderDeliveryEditor
+  api={api}
+  order={order}
+  onReload={onReload}
+  onNotice={onNotice}
+/>
 
                 <div className="admin-order-footer">
                   <div>
