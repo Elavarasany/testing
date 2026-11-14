@@ -344,7 +344,14 @@ const PRODUCT_SPECIFICATIONS = {
     {
       key: "productType",
       label: "Product Type",
-      type: "text",
+      type: "select-custom",
+      options: [
+        "Lens cleaner",
+        "Contact lens solution",
+        "Contact lens cases",
+        "Spectacle box",
+        "Spectacle cleaning cloth",
+      ],
     },
     {
       key: "brand",
@@ -1006,26 +1013,6 @@ function useAdminApi(token, onSessionEnded) {
   }, [token, onSessionEnded]);
 }
 
-
-    // Parsed JSON, or null when the session ended
-    const getJson = async (url, fallbackMessage) => {
-      const response = await authFetch(url);
-
-      if (!response) return null;
-      if (!response.ok) throw new Error(fallbackMessage);
-      return response.json();
-    };
-
-    const verifyPassword = async (password) => {
-      const response = await authFetch(
-        `${API_BASE_URL}/admin/auth/verify-password`,
-        { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ password }) },
-        { endSessionOnAuthError: false }
-      );
-
-      if (!response.ok) throw new Error(await readErrorMessage(response, "Incorrect admin password."));
-      return true;
-    };
 
 /* =========================
    DIALOG BEHAVIOUR
@@ -2505,8 +2492,25 @@ const handleProductCsvImport = async (e) => {
 
 const ORDER_STATUS_LABELS = Object.fromEntries(ORDER_STATUSES.map((s) => [s.value, s.label]));
 
-const orderTrackingLink = (order) =>
-  order.trackingToken ? `${window.location.origin}/track/${encodeURIComponent(order.trackingToken)}` : "";
+// Set to the storefront URL when the admin is hosted apart from the website. Empty uses this site's origin.
+const CUSTOMER_SITE_URL = "";
+
+const orderTrackingLink = (order) => {
+  if (!order.trackingToken) return "";
+  const base = (CUSTOMER_SITE_URL || window.location.origin).replace(/\/+$/, "");
+  return `${base}/track/${encodeURIComponent(order.trackingToken)}`;
+};
+
+// "#101" finds exactly order 101. Other text matches the order number, name, email or phone.
+// Phone digits match once four or more are typed, and spaces or dashes in the number are ignored.
+const matchesOrderSearch = (order, rawTerm) => {
+  const term = rawTerm.trim().toLowerCase();
+  if (!term) return true;
+  if (term.startsWith("#")) return String(order.id) === term.slice(1).trim();
+  if (matchesTerm(term, order.id, order.customerName, order.email)) return true;
+  const digits = term.replace(/\D/g, "");
+  return digits.length >= 4 && String(order.phone ?? "").replace(/\D/g, "").includes(digits);
+};
 
 const isOrderPaid = (order) => String(order.paymentStatus || "").toUpperCase() === "PAID";
 
@@ -2532,6 +2536,75 @@ function OrderStatusBadge({ status }) {
   );
 }
 
+const RX_FIELDS = [
+  { key: "sph", label: "SPH" },
+  { key: "cyl", label: "CYL" },
+  { key: "axis", label: "Axis" },
+  { key: "add", label: "ADDL" },
+];
+
+// Prescription the customer entered for one item. Shown only when the order record includes it;
+// otherwise the admin sees that the values were not recorded.
+function PrescriptionBlock({ item }) {
+  const rx = item.prescription;
+
+  if (!rx) {
+    return <p className="order-detail-small">{item.productName}: prescription values not recorded for this item.</p>;
+  }
+
+  if (rx.mode === "image") {
+    return (
+      <p>
+        {item.productName}: prescription file{" "}
+        {rx.imageUrl ? (
+          <a href={rx.imageUrl} target="_blank" rel="noreferrer">
+            {rx.imageName || "View file"}
+          </a>
+        ) : (
+          rx.imageName || "not uploaded"
+        )}
+      </p>
+    );
+  }
+
+  const sameForBoth = Boolean(rx.sameForBothEyes);
+  const hasAddition = [rx.right, rx.left].some((row) => row?.add);
+  const fields = RX_FIELDS.filter((field) => {
+    if (field.key === "cyl" || field.key === "axis") return Boolean(rx.hasCylinder);
+    if (field.key === "add") return hasAddition;
+    return true;
+  });
+
+  return (
+    <div className="order-rx-block">
+      <p className="order-detail-main">
+        {item.productName}
+        {sameForBoth && <span className="order-detail-small"> · Same power for both eyes</span>}
+      </p>
+
+      <table className="admin-table order-items-table">
+        <thead>
+          <tr>
+            <th scope="col">Power</th>
+            <th scope="col">Right eye</th>
+            {!sameForBoth && <th scope="col">Left eye</th>}
+          </tr>
+        </thead>
+
+        <tbody>
+          {fields.map((field) => (
+            <tr key={field.key}>
+              <td>{field.label}</td>
+              <td>{rx.right?.[field.key] || "–"}</td>
+              {!sameForBoth && <td>{rx.left?.[field.key] || "–"}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function OrderDetailsDialog({ api, order, onClose, onNotice, onReload }) {
   const { busyId, error: statusError, update } = useStatusUpdater({
     api,
@@ -2546,6 +2619,9 @@ function OrderDetailsDialog({ api, order, onClose, onNotice, onReload }) {
   const [deliveryError, setDeliveryError] = useState("");
   const [savingDelivery, setSavingDelivery] = useState(false);
   const [copied, setCopied] = useState(false);
+  const copyTimer = useRef(null);
+
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
 
   // Show the saved courier details for this order, including after a reload
   useEffect(() => {
@@ -2591,10 +2667,13 @@ function OrderDetailsDialog({ api, order, onClose, onNotice, onReload }) {
   };
 
   const copyTrackingLink = async () => {
+    if (!trackingUrl) return;
+
     try {
       await navigator.clipboard.writeText(trackingUrl);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       onNotice("Copying is not available here. Select the link and copy it manually.");
     }
@@ -2670,6 +2749,22 @@ function OrderDetailsDialog({ api, order, onClose, onNotice, onReload }) {
               </tr>
             </tfoot>
           </table>
+        </div>
+      </section>
+
+      <section className="order-section" aria-labelledby={`order-${order.id}-rx`}>
+        <h4 id={`order-${order.id}-rx`}>Prescription and dispatch notes</h4>
+
+        <div className="order-detail-card">
+          {items.length === 0 && <p className="order-detail-small">No items recorded for this order.</p>}
+          {items.map((item) => (
+            <PrescriptionBlock key={item.id ?? `${item.productId}-rx`} item={item} />
+          ))}
+        </div>
+
+        <div className="order-detail-card">
+          <h4>Order notes</h4>
+          <p>{order.notes?.trim() || "No order notes."}</p>
         </div>
       </section>
 
@@ -2782,7 +2877,7 @@ function OrderDetailsDialog({ api, order, onClose, onNotice, onReload }) {
   );
 }
 
-function OrdersPage({ api, orders, loading, onReload, onNotice }) {
+function OrdersPage({ api, orders, loading, loadError, onReload, onNotice }) {
   const [search, setSearch] = useState("");
   const [range, setRange] = useState(EMPTY_RANGE);
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -2791,11 +2886,9 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
   const bulk = useBulkClear({ api, onNotice, onReload });
 
   const visibleOrders = useMemo(() => {
-    const term = search.trim().toLowerCase();
-
     return orders.filter(
       (o) =>
-        matchesTerm(term, o.id, o.customerName, o.email, o.phone) &&
+        matchesOrderSearch(o, search) &&
         (statusFilter === "ALL" || (o.orderStatus || "PENDING") === statusFilter) &&
         inDateRange(o.orderDate, range.start, range.end)
     );
@@ -2830,8 +2923,8 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
       },
     });
 
+  // Refresh keeps the search and filters the admin has set
   const handleRefresh = async () => {
-    resetFilters();
     await onReload();
   };
 
@@ -2875,13 +2968,21 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
         </span>
       </div>
 
+      {loadError && (
+        <div className="orders-load-error" role="alert">
+          <span>Orders could not be refreshed. {loadError} The list below may be out of date.</span>
+          <button type="button" className="admin-secondary-button" onClick={onReload}>
+            Try again
+          </button>
+        </div>
+      )}
+
       <div className="admin-table-card">
         <div className="admin-table-scroll">
           <table className="admin-table admin-order-table">
             <thead>
               <tr>
                 <th scope="col">Order</th>
-                <th scope="col">Date</th>
                 <th scope="col">Customer</th>
                 <th scope="col">Items</th>
                 <th scope="col">Total</th>
@@ -2894,7 +2995,7 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
             </thead>
 
             <tbody>
-              {loading && <EmptyRow colSpan={8}>Loading orders…</EmptyRow>}
+              {loading && <EmptyRow colSpan={7}>Loading orders…</EmptyRow>}
 
               {!loading &&
                 visibleOrders.map((order) => {
@@ -2903,35 +3004,38 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
 
                   return (
                     <tr key={order.id} className={selected ? "is-selected" : ""}>
-                      <td>
-                        <strong>#{order.id}</strong>
+                      <td data-label="Order">
+                        <strong className="order-id">#{order.id}</strong>
+                        <small className="order-cell-sub">{formatDate(order.orderDate)}</small>
                       </td>
 
-                      <td>{formatDate(order.orderDate)}</td>
-
-                      <td>
-                        <span className="order-cell-name">{order.customerName || "-"}</span>
+                      <td data-label="Customer">
+                        <span className="order-cell-name" title={order.customerName || undefined}>
+                          {order.customerName || "-"}
+                        </span>
                         {order.phone && <small className="order-cell-sub">{order.phone}</small>}
                       </td>
 
-                      <td>{countUnits(order)}</td>
+                      <td data-label="Items">{countUnits(order)}</td>
 
-                      <td className="order-cell-amount">{formatINR(order.totalAmount, true)}</td>
+                      <td data-label="Total" className="order-cell-amount">
+                        {formatINR(order.totalAmount, true)}
+                      </td>
 
-                      <td>
+                      <td data-label="Payment">
                         <span className={`admin-status ${paid ? "available" : "inactive"}`}>
                           {order.paymentStatus || "PENDING"}
                         </span>
                       </td>
 
-                      <td>
+                      <td data-label="Status">
                         <OrderStatusBadge status={order.orderStatus} />
                       </td>
 
-                      <td>
+                      <td className="order-cell-action">
                         <button
                           type="button"
-                          className="admin-text-button"
+                          className="admin-text-button order-view-button"
                           aria-haspopup="dialog"
                           onClick={() => setSelectedId(order.id)}
                           aria-label={`View details for order ${order.id}`}
@@ -2943,8 +3047,17 @@ function OrdersPage({ api, orders, loading, onReload, onNotice }) {
                   );
                 })}
 
-              {!loading && visibleOrders.length === 0 && (
-                <EmptyRow colSpan={8}>
+              {!loading && loadError && orders.length === 0 && (
+                <EmptyRow colSpan={7}>
+                  <span role="alert">{loadError}</span>{" "}
+                  <button type="button" className="admin-text-button" onClick={onReload}>
+                    Try again
+                  </button>
+                </EmptyRow>
+              )}
+
+              {!loading && !loadError && visibleOrders.length === 0 && (
+                <EmptyRow colSpan={7}>
                   {orders.length === 0 ? "No orders received yet." : "No matching orders found."}
                 </EmptyRow>
               )}
@@ -3902,9 +4015,11 @@ function MarketingPage({ api, banners, offer, loading, onReload, onNotice, image
 
       <ErrorMessage>{pageError}</ErrorMessage>
 
-      <SingleImageEditor {...imageProps} slot={HERO_IMAGE_SLOT} />
-      <SingleImageEditor {...imageProps} slot={LOGO_IMAGE_SLOT} />
-      <SingleImageEditor {...imageProps} slot={STORE_IMAGE_SLOT} />
+      <div className="marketing-image-row">
+        <SingleImageEditor {...imageProps} slot={LOGO_IMAGE_SLOT} />
+        <SingleImageEditor {...imageProps} slot={STORE_IMAGE_SLOT} />
+        <SingleImageEditor {...imageProps} slot={HERO_IMAGE_SLOT} />
+      </div>
 
       <div className="admin-table-card category-images-card">
         <div className="admin-table-heading">
@@ -4479,6 +4594,7 @@ export default function AdminDashboard() {
 
   const [lists, setLists] = useState({ products: [], orders: [], appointments: [], customers: [], images: [] });
   const [loading, setLoading] = useState({});
+  const [listErrors, setListErrors] = useState({});
 
   const [banners, setBanners] = useState([]);
   const [offer, setOffer] = useState(null);
@@ -4545,7 +4661,9 @@ export default function AdminDashboard() {
       try {
         const data = await getJson(url, message);
         if (data) setLists((prev) => ({ ...prev, [key]: data }));
+        setListErrors((prev) => ({ ...prev, [key]: "" }));
       } catch (err) {
+        setListErrors((prev) => ({ ...prev, [key]: err.message || message }));
         setError(err.message || message);
       } finally {
         setLoading((prev) => ({ ...prev, [key]: false }));
@@ -4658,7 +4776,14 @@ export default function AdminDashboard() {
         );
       case "Orders":
         return (
-          <OrdersPage api={api} orders={orders} loading={loading.orders} onReload={reloaders.Orders} onNotice={setNotice} />
+          <OrdersPage
+            api={api}
+            orders={orders}
+            loading={loading.orders}
+            loadError={listErrors.orders}
+            onReload={reloaders.Orders}
+            onNotice={setNotice}
+          />
         );
       case "Appointments":
         return (
